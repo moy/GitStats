@@ -40,7 +40,26 @@ conf = {
 	'commit_end': 'HEAD',
 	'linear_linestats': 1,
 	'project_name': '',
-	'merge_authors': {}
+	'merge_authors': {},
+	'user_metrics': {'linesoftex' : {'command' : lambda sha1 :
+						 getpipeoutput(["git ls-tree %s" % sha1,
+								"grep '\.tex$'",
+								"awk '{print $3}'",
+								"xargs -n 1 git cat-file blob",
+								"wc -l"]),
+					 'name' : 'Lines of code in *.tex files',
+					 'shortname' : 'Lines'
+					 },
+			 'numberoftodos' : {'command' : lambda sha1 :
+						    getpipeoutput(["git ls-tree %s" % sha1,
+								   "grep '\.tex$'",
+								   "awk '{print $3}'",
+								   "xargs -n 1 git cat-file blob",
+								   "grep -c TODO"]),
+					    'name' : 'Number of occurences of TODO',
+					    'shortname' : 'Number of TODOs',
+					 }
+			 }
 }
 
 def getpipeoutput(cmds, quiet = False):
@@ -254,6 +273,7 @@ class GitDataCollector(DataCollector):
 		self.total_authors += int(getpipeoutput(['git shortlog -s %s' % getcommitrange(), 'wc -l']))
 		#self.total_lines = int(getoutput('git-ls-files -z |xargs -0 cat |wc -l'))
 
+
 		# tags
 		lines = getpipeoutput(['git show-ref --tags']).split('\n')
 		for line in lines:
@@ -465,7 +485,7 @@ class GitDataCollector(DataCollector):
 		extra = ''
 		if conf['linear_linestats']:
 			extra = '--first-parent -m'
-		lines = getpipeoutput(['git log --shortstat %s --pretty=format:"%%at %%aN" %s' % (extra, getcommitrange('HEAD'))]).split('\n')
+		lines = getpipeoutput(['git log --shortstat %s --pretty=format:"%%at %%H %%aN" %s' % (extra, getcommitrange('HEAD'))]).split('\n')
 		lines.reverse()
 		files = 0; inserted = 0; deleted = 0; total_lines = 0
 		author = None
@@ -475,13 +495,17 @@ class GitDataCollector(DataCollector):
 
 			# <stamp> <author>
 			if re.search('files? changed', line) == None:
-				pos = line.find(' ')
-				if pos != -1:
+				pos1 = line.find(' ')
+				pos2 = line.find(' ', pos1+1)
+				if pos1 != -1 and pos2 != -1:
 					try:
-						(stamp, author) = (int(line[:pos]), line[pos+1:])
+						(stamp, sha1, author) = (int(line[:pos1]), line[pos1+1:pos2], line[pos2:])
 						if author in conf['merge_authors']:
 							author = conf['merge_authors'][author]
-						self.changes_by_date[stamp] = { 'files': files, 'ins': inserted, 'del': deleted, 'lines': total_lines }
+						self.changes_by_date[stamp] = { 'files': files, 'ins': inserted, 'del': deleted, 'lines': total_lines}
+						for metric in conf['user_metrics'].keys():
+							my = int(conf['user_metrics'][metric]['command'](sha1))
+							self.changes_by_date[stamp]['user_metric_' + metric] = my
 
 						date = datetime.datetime.fromtimestamp(stamp)
 						yymm = date.strftime('%Y-%m')
@@ -1087,6 +1111,15 @@ class HTMLReportCreator(ReportCreator):
 			fg.write('%d %d\n' % (stamp, data.changes_by_date[stamp]['lines']))
 		fg.close()
 
+		for metric in conf['user_metrics'].keys():
+			f.write(html_header(2, conf['user_metrics'][metric]['name']))
+			f.write('<img src="user_metric_%s.png" />' % metric)
+
+			fg = open(path + '/user_metric_%s.dat' % metric, 'w')
+			for stamp in sorted(data.changes_by_date.keys()):
+				fg.write('%d %d\n' % (stamp, data.changes_by_date[stamp]['user_metric_' + metric]))
+			fg.close()
+
 		f.write('</body></html>')
 		f.close()
 
@@ -1252,6 +1285,25 @@ set bmargin 6
 plot 'lines_of_code.dat' using 1:2 w lines
 """)
 		f.close()
+
+		# User-defined metric
+		for metric in conf['user_metrics'].keys():
+			f = open(path + '/user_metric_%s.plot' % metric, 'w')
+			f.write(GNUPLOT_COMMON)
+			f.write(
+"""
+unset key
+set xdata time
+set timefmt "%s"
+set format x "%Y-%m-%d"
+set grid y
+set xtics rotate
+set bmargin 6
+""")
+			f.write('set ylabel "%s"\n' % conf['user_metrics'][metric]['shortname'])
+			f.write("set output 'user_metric_%s.png'\n" % metric)
+			f.write("plot 'user_metric_%s.dat' using 1:2 w lines\n" % metric)
+			f.close()
 
 		# Lines of Code Added per author
 		f = open(path + '/lines_of_code_by_author.plot', 'w')
